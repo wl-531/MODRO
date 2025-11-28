@@ -344,7 +344,10 @@ class ROSASolver:
 
     def _get_best_feasible(self, population: List[List[int]], fitness: List[float],
                            tasks: List[dict], servers: List[dict]) -> List[int]:
-        """返回最优可行解，无可行解时返回违规最小的解"""
+        """返回最优可行解，无可行解时返回违规最小的解
+
+        [修正] 使用L2范数衡量违规度，与_evaluate中的惩罚项保持一致
+        """
         C_j = np.array([s['C'] for s in servers])
 
         best_feasible_ind = None
@@ -354,7 +357,8 @@ class ROSASolver:
 
         for ind, fit in zip(population, fitness):
             _, _, robust_load = self._compute_server_loads(ind, tasks, servers)
-            violation = np.sum(np.maximum(0, robust_load - self.theta * C_j))
+            # [修正] 使用L2范数（平方和），避免单点爆破
+            violation = np.sum(np.maximum(0, robust_load - self.theta * C_j) ** 2)
 
             if violation < 1e-6:  # 可行解
                 if fit < best_feasible_fit:

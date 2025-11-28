@@ -50,31 +50,41 @@ def validate_system_params(servers: List[Server], batch_size: int,
                            theta: float) -> dict:
     """验证系统参数合理性
 
-    注意: 鲁棒负载利用方差可加性计算,而非简单累加边际鲁棒负载
+    [关键修正] 鲁棒负载应按'分散到M台服务器'计算，而非'聚合到一台'
+    分散视角: Sum of Std = √(nM) × σ̄ (方差可加但标准差不可加)
+    聚合视角: Aggregated Std = √n × σ̄ (错误假设: 所有任务在一台服务器上)
     """
+    n_servers = len(servers)
     total_capacity = sum(s.C for s in servers)
 
     # 期望负载
     expected_load = batch_size * mu_avg
     rho_expected = expected_load / total_capacity
 
-    # [修正] 鲁棒负载: 利用方差可加性
-    # Var(L̃) = Σ σ_i² = n × σ̄²
-    # Std(L̃) = √(n × σ̄²) = √n × σ̄
+    # [修正] 分散式鲁棒负载计算
     sigma_avg = mu_avg * cv_avg
-    total_std = np.sqrt(batch_size) * sigma_avg  # √n × σ̄
-    robust_load = expected_load + kappa * total_std
+    tasks_per_server = batch_size / n_servers
+    std_per_server = np.sqrt(tasks_per_server) * sigma_avg
+    robust_buffer = n_servers * kappa * std_per_server  # = κ × √(nM) × σ̄
+    robust_load = expected_load + robust_buffer
     rho_robust = robust_load / total_capacity
 
     # θ约束下的有效负载率
     effective_capacity = theta * total_capacity
     rho_effective = robust_load / effective_capacity
 
+    # [诊断] 对比聚合视角(用于验证修正的必要性)
+    aggregated_std = np.sqrt(batch_size) * sigma_avg  # √n × σ̄
+    aggregated_buffer = kappa * aggregated_std
+    buffer_ratio = robust_buffer / aggregated_buffer  # 理论值: √M
+
     return {
         'total_capacity': total_capacity,
         'expected_load': expected_load,
         'robust_load': robust_load,
-        'total_std': total_std,  # 便于调试
+        'robust_buffer': robust_buffer,  # 分散视角缓冲
+        'aggregated_buffer': aggregated_buffer,  # 聚合视角缓冲(仅供对比)
+        'buffer_ratio': buffer_ratio,  # 应约等于√M
         'rho_expected': rho_expected,
         'rho_robust': rho_robust,
         'rho_effective': rho_effective,
