@@ -67,6 +67,12 @@ class ROSASolver:
         # 1. Robust-FFD 初始化
         population = self._initialize_population(task_dicts, server_dicts)
 
+        # 0. 保存初始精英解(防止进化破坏优质初始解)
+        elite = population[0]
+        _, _, elite_load = self._compute_server_loads(elite, task_dicts, server_dicts)
+        C_j_arr = np.array([s['C'] for s in server_dicts])
+        fallback_solution = elite if np.all(elite_load <= self.theta * C_j_arr) else None
+
         # 2. 初始化归一化边界
         self._init_normalization_bounds(population, task_dicts, server_dicts)
 
@@ -91,7 +97,15 @@ class ROSASolver:
                 population, fitness, offspring, offspring_fitness
             )
 
-        return self._get_best_feasible(population, fitness, task_dicts, server_dicts)
+        # 获取最优解
+        best = self._get_best_feasible(population, fitness, task_dicts, server_dicts)
+        _, _, best_load = self._compute_server_loads(best, task_dicts, server_dicts)
+
+        # 如果进化结果不可行，但初始精英解可行，则强制回退
+        if (not np.all(best_load <= self.theta * C_j_arr)) and (fallback_solution is not None):
+            return fallback_solution
+
+        return best
 
     def _initialize_population(self, tasks: List[dict], servers: List[dict]) -> List[List[int]]:
         """Robust-FFD 初始化
@@ -294,11 +308,24 @@ class ROSASolver:
             if gap_j[j_tgt] > gap_j[j_src] and j_tgt != j_src:
                 ind[i_risk] = j_tgt
         else:
-            # Random Mutation
+            # Random Mutation (Safe Mode)
             i = np.random.randint(len(ind))
-            j_new = np.random.randint(n_servers)
-            while j_new == ind[i] and n_servers > 1:
-                j_new = np.random.randint(n_servers)
+            j_old = ind[i]
+
+            # 计算当前Gap
+            _, _, robust_load = self._compute_server_loads(ind, tasks, servers)
+            C_j = np.array([s['C'] for s in servers])
+            gap_j = self.theta * C_j - robust_load
+
+            # 智能筛选: 只变异到有剩余空间(Gap>0)的服务器
+            candidates = [j for j in range(n_servers) if j != j_old and gap_j[j] > 0]
+
+            if candidates:
+                j_new = candidates[np.random.randint(len(candidates))]
+            else:
+                # 如果都满了,选择溢出最少的(Gap最大)
+                j_new = int(np.argmax(gap_j))
+
             ind[i] = j_new
 
         return ind
@@ -317,22 +344,26 @@ class ROSASolver:
 
     def _get_best_feasible(self, population: List[List[int]], fitness: List[float],
                            tasks: List[dict], servers: List[dict]) -> List[int]:
-        """返回最优可行解"""
+        """返回最优可行解，无可行解时返回违规最小的解"""
         C_j = np.array([s['C'] for s in servers])
 
-        best_ind = None
-        best_fit = float('inf')
+        best_feasible_ind = None
+        best_feasible_fit = float('inf')
+        min_violation_ind = None
+        min_violation_val = float('inf')
 
         for ind, fit in zip(population, fitness):
             _, _, robust_load = self._compute_server_loads(ind, tasks, servers)
+            violation = np.sum(np.maximum(0, robust_load - self.theta * C_j))
 
-            if np.all(robust_load <= self.theta * C_j):
-                if fit < best_fit:
-                    best_fit = fit
-                    best_ind = ind
+            if violation < 1e-6:  # 可行解
+                if fit < best_feasible_fit:
+                    best_feasible_fit = fit
+                    best_feasible_ind = ind
+            else:  # 不可行解
+                if violation < min_violation_val:
+                    min_violation_val = violation
+                    min_violation_ind = ind
 
-        if best_ind is None:
-            best_idx = int(np.argmin(fitness))
-            best_ind = population[best_idx]
-
-        return best_ind
+        # 优先返回可行解，否则返回违规最小的解(安全保底)
+        return best_feasible_ind if best_feasible_ind is not None else min_violation_ind

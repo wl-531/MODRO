@@ -24,7 +24,7 @@ W3 = 0.2  # Marginal Uncertainty Risk权重
 # 实验物理参数
 BATCH_SIZE = 80                 # 每批任务数量
 N_SERVERS = 5                   # 服务器数量
-DECISION_INTERVAL = 9.0         # 决策周期(秒),最优Sweet Spot,预期ρ_eff≈0.78,兼顾压力与稳定性
+DECISION_INTERVAL = 8.5         # 决策周期(秒),黄金点,预期ρ_eff≈0.85,为ROSA提供优化空间
 
 # 任务工作量参数
 MU_RANGE = (10, 100)            # 期望工作量范围
