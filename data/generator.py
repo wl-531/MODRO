@@ -25,15 +25,16 @@ def generate_tasks(n_tasks: int,
 
 
 def generate_servers(n_servers: int,
-                     f_range: Tuple[float, float] = (100, 200),
+                     f_range: Tuple[float, float] = (130, 170),
                      decision_interval: float = 15.0) -> List[Server]:
     """生成服务器列表
 
     [核心修改] C = f × T(物理一致性约束)
+    [修正] f_range缩小至(130,170),确保最小容量>平均负载,避免物理瓶颈
 
     Args:
         n_servers: 服务器数量
-        f_range: CPU频率范围
+        f_range: CPU频率范围(缩小异构性)
         decision_interval: 决策周期(秒)
     """
     servers = []

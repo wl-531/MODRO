@@ -154,12 +154,10 @@ class ROSASolver:
                     chosen = feasible[0]
                 j_star = chosen[0]
             else:
-                if randomize:
-                    j_star = np.random.randint(n_servers)
-                else:
-                    robust_loads = current_mu_sum + self.kappa * np.sqrt(current_var_sum)
-                    utils = robust_loads / np.array([s['C'] for s in servers])
-                    j_star = int(np.argmin(utils))
+                # [修复] 统一使用Max Gap策略,避免随机分配导致的连锁过载
+                std_j = np.sqrt(np.maximum(current_var_sum, 1e-10))  # 防止零值
+                gap_j = self.theta * np.array([s['C'] for s in servers]) - (current_mu_sum + self.kappa * std_j)
+                j_star = int(np.argmax(gap_j))  # 选择剩余空间最大(或溢出最小)的服务器
 
             assignment[task_idx] = j_star
             current_mu_sum[j_star] += mu_i
