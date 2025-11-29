@@ -25,16 +25,18 @@ def generate_tasks(n_tasks: int,
 
 
 def generate_servers(n_servers: int,
-                     f_range: Tuple[float, float] = (130, 170),
+                     f_range: Tuple[float, float] = (100, 200),
                      decision_interval: float = 15.0) -> List[Server]:
     """生成服务器列表
 
     [核心修改] C = f × T(物理一致性约束)
-    [修正] f_range缩小至(130,170),确保最小容量>平均负载,避免物理瓶颈
+    [核心修改] f_range扩大至(100,200)以引入强异构性
+
+    强异构性会导致Baseline容易撑爆小服务器,而ROSA能利用大服务器避险
 
     Args:
         n_servers: 服务器数量
-        f_range: CPU频率范围(缩小异构性)
+        f_range: CPU频率范围(强异构性,100-200)
         decision_interval: 决策周期(秒)
     """
     servers = []

@@ -71,7 +71,9 @@ class ROSASolver:
         elite = population[0]
         _, _, elite_load = self._compute_server_loads(elite, task_dicts, server_dicts)
         C_j_arr = np.array([s['C'] for s in server_dicts])
-        fallback_solution = elite if np.all(elite_load <= self.theta * C_j_arr) else None
+        # [修复缺陷1] 即使不可行也保存，后续会比较违规程度
+        fallback_solution = elite
+        fallback_violation = np.sum(np.maximum(0, elite_load - self.theta * C_j_arr) ** 2)
 
         # 2. 初始化归一化边界
         self._init_normalization_bounds(population, task_dicts, server_dicts)
@@ -99,13 +101,23 @@ class ROSASolver:
 
         # 获取最优解
         best = self._get_best_feasible(population, fitness, task_dicts, server_dicts)
-        _, _, best_load = self._compute_server_loads(best, task_dicts, server_dicts)
 
-        # 如果进化结果不可行，但初始精英解可行，则强制回退
-        if (not np.all(best_load <= self.theta * C_j_arr)) and (fallback_solution is not None):
+        # [修复缺陷2] 处理极端情况：如果best是None（理论上不会），返回fallback
+        if best is None:
             return fallback_solution
 
-        return best
+        _, _, best_load = self._compute_server_loads(best, task_dicts, server_dicts)
+        best_violation = np.sum(np.maximum(0, best_load - self.theta * C_j_arr) ** 2)
+
+        # [修复缺陷3] 比较违规程度，选择更优的解
+        # 1. 如果best可行，直接返回
+        if best_violation < 1e-6:
+            return best
+        # 2. 如果都不可行，返回违规更小的
+        if best_violation > fallback_violation:
+            return fallback_solution
+        else:
+            return best
 
     def _initialize_population(self, tasks: List[dict], servers: List[dict]) -> List[List[int]]:
         """Robust-FFD 初始化
