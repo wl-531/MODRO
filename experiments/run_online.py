@@ -40,23 +40,28 @@ def update_server_state(servers: list, assignment: list, tasks: list,
                         processing_time: float):
     """更新服务器已有负载
 
-    重要说明:
-    - 一旦批次调度完成并经过一段时间,其负载成为 L0 的一部分
-    - L0 被视为确定性负载(方差已实现或通过监控获知)
-    - 因此我们不跟踪 L0 的残余方差
+    [关键修正] 使用实际采样的工作量（而非期望值）来更新状态
+    这体现了任务工作量的不确定性——论文的核心主题
 
-    简化模型: 使用期望工作量更新 L0
-    完整模拟: 可改为从 N(μ, σ²) 采样实际工作量
+    重要说明:
+    - 实际工作量 w_i ~ N(μ_i, σ_i²)
+    - 一旦任务执行完成，其实际工作量成为确定值（L0 的一部分）
+    - L0 被视为确定性负载（方差已实现或通过监控获知）
     """
     n_servers = len(servers)
 
-    new_load = np.zeros(n_servers)
+    # [关键修改] 采样实际工作量，而非使用期望值
+    actual_load = np.zeros(n_servers)
     for i, j in enumerate(assignment):
-        new_load[j] += tasks[i].mu
+        # 从 N(μ, σ²) 采样实际工作量
+        w_actual = np.random.normal(tasks[i].mu, tasks[i].sigma)
+        w_actual = max(0.0, w_actual)  # 截断负值
+        actual_load[j] += w_actual
 
+    # 更新 L0
     for j in range(n_servers):
         processed = servers[j].f * processing_time
-        servers[j].L0 = max(0.0, servers[j].L0 + new_load[j] - processed)
+        servers[j].L0 = max(0.0, servers[j].L0 + actual_load[j] - processed)
 
 
 def run_experiment(n_batches: int = 10, verbose: bool = True):

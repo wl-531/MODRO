@@ -21,14 +21,14 @@ W1 = 0.40         # Robust Makespan权重
 W2 = 0.25         # Robust Load Imbalance权重(优化利用率均衡,在异构下合理)
 W3 = 0.35         # Marginal Uncertainty Risk权重(关键:引导高风险任务去大服务器)
 
-# 实验物理参数
-BATCH_SIZE = 80                 # 每批任务数量
+# 实验物理参数（压力测试配置 - 制造L0累积）
+BATCH_SIZE = 80                  # [极端测试] 单任务在线场景
 N_SERVERS = 5                   # 服务器数量
-DECISION_INTERVAL = 9.5         # [关键] 决策周期(秒),配合异构性,rho_eff < 1.0可行
+DECISION_INTERVAL = 8.8         # [压力测试] 微调到8.8s,目标rho_eff≈96-100%(刚好可行)
 
 # 任务工作量参数
 MU_RANGE = (10, 100)            # 期望工作量范围
-CV_RANGE = (0.45, 0.60)         # 保持高波动,展示ROSA优势
+CV_RANGE = (0.48, 0.62)         # [压力测试] 适度波动,避免鲁棒缓冲过大
 
 # 蒙特卡洛
 MC_SAMPLES = 10000              # 蒙特卡洛采样次数
