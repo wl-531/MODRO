@@ -9,31 +9,14 @@ from config import *
 from models.task import Task
 from models.server import Server
 from solvers.rosa import ROSASolver
+# MODIFIED: 从baselines模块导入baseline算法
+from solvers.baselines import deterministic_greedy, variance_aware_greedy
+from solvers.nsga2_mean import NSGA2MeanSolver  # NEW: risk-neutral NSGA-II
 from evaluation.objectives import compute_objectives
 from evaluation.monte_carlo import monte_carlo_cvr
 from data.generator import generate_tasks, generate_servers, validate_system_params
 
-
-def deterministic_greedy(tasks, servers):
-    """Deterministic-Greedy基准算法
-
-    按期望负载E[L]=L0+Σμ最小化原则进行贪婪分配,不考虑方差σ
-    """
-    n_tasks = len(tasks)
-    n_servers = len(servers)
-    assignment = []
-
-    current_load = np.array([s.L0 for s in servers])
-
-    for i in range(n_tasks):
-        mu_i = tasks[i].mu
-
-        # 选择当前期望负载最小的服务器
-        j_min = int(np.argmin(current_load))
-        assignment.append(j_min)
-        current_load[j_min] += mu_i
-
-    return assignment
+# MOVED: deterministic_greedy 已移至 solvers/baselines.py
 
 
 def update_server_state(servers: list, assignment: list, tasks: list,
@@ -77,6 +60,12 @@ def run_experiment(n_batches: int = 10, verbose: bool = True):
         lambda_0=LAMBDA_0, beta=BETA,
         w1=W1, w2=W2, w3=W3
     )
+    # NEW: NSGA-II (均值) baseline
+    nsga_mean = NSGA2MeanSolver(
+        n_pop=N_POP, g_max=G_MAX, t_max=T_MAX,
+        p_c=P_C, p_m=P_M, n_elite=N_ELITE,
+        w1=W1, w2=W2, w3=W3
+    )
 
     # 生成初始服务器
     servers_init = generate_servers(
@@ -106,16 +95,20 @@ def run_experiment(n_batches: int = 10, verbose: bool = True):
 
     if not validation['feasible']:
         print("警告: 系统参数导致无可行解,请增加 DECISION_INTERVAL")
-        return None
+#        return None
 
-    # [修复] 使用deepcopy创建完全独立的双环境
+    # MODIFIED: 使用deepcopy创建完全独立的三环境
     servers_baseline = deepcopy(servers_init)
     servers_rosa = deepcopy(servers_init)
+    servers_vag = deepcopy(servers_init)  # NEW: VAG独立环境
+    servers_nsga = deepcopy(servers_init)  # NEW: NSGA-II(均值)独立环境
 
     results_baseline = {'cvr': [], 'residual': []}
     results_rosa = {'cvr': [], 'O1': [], 'O2': [], 'O3': [], 'residual': []}
+    results_vag = {'cvr': [], 'residual': []}  # NEW: VAG结果记录
+    results_nsga = {'cvr': [], 'residual': []}  # NEW: NSGA-II(均值)结果记录
 
-    print("===== ROSA vs Baseline 对比实验 =====\n")
+    print("===== ROSA vs Baseline vs VAG 对比实验 =====\n")
 
     for batch_idx in range(n_batches):
         # 生成相同的任务批次
@@ -124,6 +117,8 @@ def run_experiment(n_batches: int = 10, verbose: bool = True):
         # [关键] 记录更新前的残留负载
         residual_baseline_before = sum(s.L0 for s in servers_baseline)
         residual_rosa_before = sum(s.L0 for s in servers_rosa)
+        residual_vag_before = sum(s.L0 for s in servers_vag)  # NEW
+        residual_nsga_before = sum(s.L0 for s in servers_nsga)  # NEW
 
         # Baseline算法
         assignment_baseline = deterministic_greedy(tasks, servers_baseline)
@@ -134,14 +129,27 @@ def run_experiment(n_batches: int = 10, verbose: bool = True):
         cvr_rosa = monte_carlo_cvr(assignment_rosa, tasks, servers_rosa, MC_SAMPLES)
         obj_rosa = compute_objectives(assignment_rosa, tasks, servers_rosa, KAPPA, THETA)
 
+        # NEW: VAG算法
+        assignment_vag = variance_aware_greedy(tasks, servers_vag, lambda_=1.0)
+        cvr_vag = monte_carlo_cvr(assignment_vag, tasks, servers_vag, MC_SAMPLES)
+        # NEW: NSGA-II(均值)算法
+        assignment_nsga = nsga_mean.solve_batch(tasks, servers_nsga)
+        cvr_nsga = monte_carlo_cvr(assignment_nsga, tasks, servers_nsga, MC_SAMPLES)
+
         # [关键] 先更新服务器状态，再记录更新后的残留负载
         update_server_state(servers_baseline, assignment_baseline, tasks,
                            processing_time=DECISION_INTERVAL)
         update_server_state(servers_rosa, assignment_rosa, tasks,
                            processing_time=DECISION_INTERVAL)
+        update_server_state(servers_vag, assignment_vag, tasks,  # NEW
+                           processing_time=DECISION_INTERVAL)
+        update_server_state(servers_nsga, assignment_nsga, tasks,  # NEW
+                           processing_time=DECISION_INTERVAL)
 
         residual_baseline_after = sum(s.L0 for s in servers_baseline)
         residual_rosa_after = sum(s.L0 for s in servers_rosa)
+        residual_vag_after = sum(s.L0 for s in servers_vag)  # NEW
+        residual_nsga_after = sum(s.L0 for s in servers_nsga)  # NEW
 
         # 记录结果
         results_baseline['cvr'].append(cvr_baseline)
@@ -153,20 +161,40 @@ def run_experiment(n_batches: int = 10, verbose: bool = True):
         results_rosa['O3'].append(obj_rosa['O3'])
         results_rosa['residual'].append(residual_rosa_after)
 
+        # NEW: 记录VAG结果
+        results_vag['cvr'].append(cvr_vag)
+        results_vag['residual'].append(residual_vag_after)
+        # NEW: 记录NSGA-II(均值)结果
+        results_nsga['cvr'].append(cvr_nsga)
+        results_nsga['residual'].append(residual_nsga_after)
+
         # 计算改进百分比
         improvement = ((cvr_baseline - cvr_rosa) / max(cvr_baseline, 1e-6)) * 100
+        improvement_vag = ((cvr_baseline - cvr_vag) / max(cvr_baseline, 1e-6)) * 100  # NEW
+        improvement_nsga = ((cvr_baseline - cvr_nsga) / max(cvr_baseline, 1e-6)) * 100  # NEW
 
-        if verbose:
+        if verbose:  # MODIFIED: 添加VAG输出
             print(f"Batch {batch_idx + 1}/{n_batches}: "
                   f"Baseline_CVR={cvr_baseline:.4f} (L0: {residual_baseline_before:.1f}->{residual_baseline_after:.1f}) | "
+                  f"VAG_CVR={cvr_vag:.4f} (L0: {residual_vag_before:.1f}->{residual_vag_after:.1f}) | "
+                  f"NSGAmean_CVR={cvr_nsga:.4f} (L0: {residual_nsga_before:.1f}->{residual_nsga_after:.1f}) | "
                   f"ROSA_CVR={cvr_rosa:.4f} (L0: {residual_rosa_before:.1f}->{residual_rosa_after:.1f}) "
-                  f"[Improvement: {improvement:+.1f}%]")
+                  f"[ROSA vs Base: {improvement:+.1f}% | VAG vs Base: {improvement_vag:+.1f}% | NSGAmean vs Base: {improvement_nsga:+.1f}%]")
 
     # 汇总结果
     print("\n===== 实验结果汇总 =====")
     print(f"\n[Baseline - Deterministic Greedy]")
     print(f"  平均 CVR: {np.mean(results_baseline['cvr']):.4f} ± {np.std(results_baseline['cvr']):.4f}")
     print(f"  平均残留: {np.mean(results_baseline['residual']):.1f}")
+
+    # NEW: 添加VAG统计
+    print(f"\n[VAG - Variance-Aware Greedy]")
+    print(f"  平均 CVR: {np.mean(results_vag['cvr']):.4f} ± {np.std(results_vag['cvr']):.4f}")
+    print(f"  平均残留: {np.mean(results_vag['residual']):.1f}")
+    # NEW: 添加NSGA-II(均值)统计
+    print(f"\n[NSGA-II Mean - Risk Neutral]")
+    print(f"  平均 CVR: {np.mean(results_nsga['cvr']):.4f} ± {np.std(results_nsga['cvr']):.4f}")
+    print(f"  平均残留: {np.mean(results_nsga['residual']):.1f}")
 
     print(f"\n[ROSA - Robust Online Scheduling]")
     print(f"  平均 CVR: {np.mean(results_rosa['cvr']):.4f} ± {np.std(results_rosa['cvr']):.4f}")
@@ -175,21 +203,29 @@ def run_experiment(n_batches: int = 10, verbose: bool = True):
     print(f"  平均 O3:  {np.mean(results_rosa['O3']):.2f} ± {np.std(results_rosa['O3']):.2f}")
     print(f"  平均残留: {np.mean(results_rosa['residual']):.1f}")
 
-    # 总体改进
+    # MODIFIED: 总体改进（添加VAG）
     avg_baseline_cvr = np.mean(results_baseline['cvr'])
+    avg_vag_cvr = np.mean(results_vag['cvr'])  # NEW
+    avg_nsga_cvr = np.mean(results_nsga['cvr'])  # NEW
     avg_rosa_cvr = np.mean(results_rosa['cvr'])
-    total_improvement = ((avg_baseline_cvr - avg_rosa_cvr) / max(avg_baseline_cvr, 1e-6)) * 100
+    total_improvement_rosa = ((avg_baseline_cvr - avg_rosa_cvr) / max(avg_baseline_cvr, 1e-6)) * 100
+    total_improvement_vag = ((avg_baseline_cvr - avg_vag_cvr) / max(avg_baseline_cvr, 1e-6)) * 100  # NEW
+    total_improvement_nsga = ((avg_baseline_cvr - avg_nsga_cvr) / max(avg_baseline_cvr, 1e-6)) * 100  # NEW
 
     print(f"\n[对比结果]")
-    print(f"  ROSA相对Baseline的CVR改进: {total_improvement:+.1f}%")
+    print(f"  VAG相对Baseline的CVR改进: {total_improvement_vag:+.1f}%")  # NEW
+    print(f"  NSGA-II(Mean)相对Baseline的CVR改进: {total_improvement_nsga:+.1f}%")  # NEW
+    print(f"  ROSA相对Baseline的CVR改进: {total_improvement_rosa:+.1f}%")
 
     if avg_rosa_cvr < ALPHA:
         print(f"  ROSA性能: [成功] CVR ({avg_rosa_cvr:.4f}) < α ({ALPHA})")
     else:
         print(f"  ROSA性能: [失败] CVR ({avg_rosa_cvr:.4f}) >= α ({ALPHA})")
 
-    return {
+    return {  # MODIFIED: 添加VAG/NSGA结果
         'baseline': results_baseline,
+        'vag': results_vag,  # NEW
+        'nsga_mean': results_nsga,  # NEW
         'rosa': results_rosa
     }
 

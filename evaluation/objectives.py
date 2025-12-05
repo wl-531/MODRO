@@ -22,13 +22,13 @@ def compute_objectives(assignment: List[int], tasks: List, servers: List,
     robust_load = mu_sum + kappa * np.sqrt(var_sum)
 
     f_j = np.array([s.f for s in servers])
-    C_j = np.array([s.C for s in servers])
 
     O1 = float(np.max(robust_load / f_j))
 
-    rho = robust_load / C_j
-    O2 = float(np.std(rho))
+    # 与论文一致：O2 为鲁棒负载的标准差（不除以容量）
+    O2 = float(np.std(robust_load))
 
+    C_j = np.array([s.C for s in servers])
     gap_j = theta * C_j - robust_load
     epsilon = 0.01 * np.mean(C_j)
     O3 = sum(

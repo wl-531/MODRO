@@ -75,17 +75,16 @@ class ROSASolver:
         fallback_solution = elite
         fallback_violation = np.sum(np.maximum(0, elite_load - self.theta * C_j_arr) ** 2)
 
-        # 2. 初始化归一化边界
-        self._init_normalization_bounds(population, task_dicts, server_dicts)
-
-        # 3. 评估初始种群
-        fitness = [self._evaluate(ind, task_dicts, server_dicts, g=0)
-                   for ind in population]
-
-        # 4. 迭代进化
+        # 迭代进化
         start_time = time.time()
         g = 0
+        fitness = None
         while time.time() - start_time < self.t_max and g < self.g_max:
+            # 每代刷新归一化边界并重评父代（与论文描述一致）
+            self._init_normalization_bounds(population, task_dicts, server_dicts)
+            fitness = [self._evaluate(ind, task_dicts, server_dicts, g=g)
+                       for ind in population]
+
             parents = self._tournament_selection(population, fitness)
             offspring = self._uniform_crossover(parents)
             offspring = [self._hybrid_mutation(ind, task_dicts, server_dicts)
@@ -98,6 +97,11 @@ class ROSASolver:
             population, fitness = self._elitist_replacement(
                 population, fitness, offspring, offspring_fitness
             )
+
+        # 进化结束后再刷新一次归一化边界并评估，用于最终选择
+        self._init_normalization_bounds(population, task_dicts, server_dicts)
+        fitness = [self._evaluate(ind, task_dicts, server_dicts, g=g)
+                   for ind in population]
 
         # 获取最优解
         best = self._get_best_feasible(population, fitness, task_dicts, server_dicts)
@@ -180,10 +184,13 @@ class ROSASolver:
                     chosen = feasible[0]
                 j_star = chosen[0]
             else:
-                # [修复] 统一使用Max Gap策略,避免随机分配导致的连锁过载
-                std_j = np.sqrt(np.maximum(current_var_sum, 1e-10))  # 防止零值
-                gap_j = self.theta * np.array([s['C'] for s in servers]) - (current_mu_sum + self.kappa * std_j)
-                j_star = int(np.argmax(gap_j))  # 选择剩余空间最大(或溢出最小)的服务器
+                # 论文算法2回退：选择鲁棒利用率最小的服务器
+                C_arr = np.array([s['C'] for s in servers])
+                new_mu = current_mu_sum + mu_i
+                new_std = np.sqrt(current_var_sum + sigma_i ** 2)
+                new_robust = new_mu + self.kappa * new_std
+                utilization = new_robust / C_arr
+                j_star = int(np.argmin(utilization))
 
             assignment[task_idx] = j_star
             current_mu_sum[j_star] += mu_i
@@ -216,9 +223,8 @@ class ROSASolver:
         # O1: Robust Makespan
         O1 = float(np.max(robust_load / f_j))
 
-        # O2: Robust Load Imbalance
-        rho = robust_load / C_j
-        O2 = float(np.std(rho))
+        # O2: Robust Load Imbalance (鲁棒负载标准差，与论文一致)
+        O2 = float(np.std(robust_load))
 
         # O3: Marginal Uncertainty Risk
         gap_j = self.theta * C_j - robust_load
@@ -232,7 +238,7 @@ class ROSASolver:
 
     def _init_normalization_bounds(self, population: List[List[int]],
                                    tasks: List[dict], servers: List[dict]):
-        """基于初始种群确定归一化边界"""
+        """基于当前种群确定归一化边界"""
         O1_vals, O2_vals, O3_vals = [], [], []
 
         for ind in population:
