@@ -47,8 +47,14 @@ def update_server_state(servers: list, assignment: list, tasks: list,
         servers[j].L0 = max(0.0, servers[j].L0 + actual_load[j] - processed)
 
 
-def run_experiment(n_batches: int = 10, verbose: bool = True):
-    """运行微批处理在线实验 - ROSA vs Baseline对比"""
+def run_experiment(n_batches: int = 10, verbose: bool = True, task_mode: str = "coupled"):
+    """运行微批处理在线实验 - ROSA vs Baseline对比
+
+    Args:
+        n_batches: 批次数
+        verbose: 是否打印每批次日志
+        task_mode: 任务生成模式 ("coupled" 默认，"bimodal" 生成双峰任务)
+    """
 
     # 固定随机种子确保可复现
     np.random.seed(42)
@@ -111,8 +117,8 @@ def run_experiment(n_batches: int = 10, verbose: bool = True):
     print("===== ROSA vs Baseline vs VAG 对比实验 =====\n")
 
     for batch_idx in range(n_batches):
-        # 生成相同的任务批次
-        tasks = generate_tasks(BATCH_SIZE, MU_RANGE, CV_RANGE)
+        # 生成相同的任务批次（支持 bimodal/coupled）
+        tasks = generate_tasks(BATCH_SIZE, MU_RANGE, CV_RANGE, mode=task_mode)
 
         # [关键] 记录更新前的残留负载
         residual_baseline_before = sum(s.L0 for s in servers_baseline)
@@ -231,4 +237,5 @@ def run_experiment(n_batches: int = 10, verbose: bool = True):
 
 
 if __name__ == '__main__':
-    results = run_experiment(n_batches=10, verbose=True)
+    #results = run_experiment(n_batches=10, verbose=True)
+    results = run_experiment(n_batches=10, verbose=True, task_mode="bimodal")

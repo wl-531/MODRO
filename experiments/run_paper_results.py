@@ -29,18 +29,22 @@ def set_config(updates: dict):
 if not hasattr(config, 'VAG_LAMBDA'):
     setattr(config, 'VAG_LAMBDA', 1.0)
 
-def run_batch_simulation(n_batches=50, label="Experiment", enable_all_algos=True):
+def run_batch_simulation(n_batches=50, label="Experiment", enable_all_algos=True,
+                         task_mode="coupled"):
     """运行批量仿真，支持4个算法：DG / VAG / NSGA2Mean / ROSA
 
     Args:
         n_batches: 批次数量
         label: 实验标签
         enable_all_algos: 是否启用所有算法（False时只运行DG和ROSA，兼容旧版）
+        task_mode: 任务生成模式
+            - "coupled": 原模式，σ = μ × CV（默认）
+            - "bimodal": 双峰模式，μ-σ 解耦
 
     Returns:
         results: {algo_name: {'cvr': [...], 'L0': [...]}}
     """
-    print(f"\n>>> Running {label} (n={n_batches})...")
+    print(f"\n>>> Running {label} (n={n_batches}, task_mode={task_mode})...")
     np.random.seed(42)
 
     # MODIFIED: 创建4份独立服务器副本
@@ -78,7 +82,9 @@ def run_batch_simulation(n_batches=50, label="Experiment", enable_all_algos=True
         results['nsga'] = {'cvr': [], 'L0': []}
 
     for i in range(n_batches):
-        tasks = generate_tasks(config.BATCH_SIZE, config.MU_RANGE, config.CV_RANGE)
+        # MODIFIED: 传入 task_mode 参数
+        tasks = generate_tasks(config.BATCH_SIZE, config.MU_RANGE, config.CV_RANGE,
+                               mode=task_mode)
 
         # DG算法
         assign_dg = deterministic_greedy(tasks, servers_dg)
@@ -308,14 +314,70 @@ def exp3_ablation_study():
         'rosa_norisk': cvr_rosa_norisk
     }
 
+def exp4_bimodal_comparison():
+    """实验4: 双峰分布对比实验（验证 μ-σ 解耦后 ROSA 优势）"""
+    print("\n" + "="*60)
+    print("EXP 4: Bimodal Distribution (μ-σ Decoupled)")
+    print("="*60)
+
+    # 使用与 exp1 相同的基础配置
+    set_config({
+        'BATCH_SIZE': 80,
+        'DECISION_INTERVAL': 8.8,
+        'ALPHA': 0.15,
+        'KAPPA': 2.38,
+        'W1': 0.40, 'W2': 0.25, 'W3': 0.35,
+        'VAG_LAMBDA': 1.0
+    })
+
+    # 关键：使用 task_mode="bimodal"
+    res = run_batch_simulation(n_batches=50, label="Bimodal_Comparison",
+                               enable_all_algos=True,
+                               task_mode="bimodal")
+
+    # 统计所有算法结果
+    print(f"\n[Results - Bimodal Distribution]")
+    for algo_name in ['dg', 'vag', 'nsga', 'rosa']:
+        cvr_mean = np.mean(res[algo_name]['cvr'])
+        cvr_std = np.std(res[algo_name]['cvr'])
+        L0_mean = np.mean(res[algo_name]['L0'])
+        print(f"  {algo_name.upper():8s}: CVR = {cvr_mean:.4f} ± {cvr_std:.4f}, Avg L0 = {L0_mean:.1f}")
+
+    # 计算相对DG的改进
+    dg_cvr = np.mean(res['dg']['cvr'])
+    print(f"\n[CVR Reduction vs DG]")
+    for algo in ['vag', 'nsga', 'rosa']:
+        improvement = (dg_cvr - np.mean(res[algo]['cvr'])) / dg_cvr * 100
+        print(f"  {algo.upper():8s}: {improvement:+.1f}%")
+
+    # 保存到 CSV
+    csv_data = []
+    for algo_name in ['dg', 'vag', 'nsga', 'rosa']:
+        csv_data.append({
+            'exp_type': 'bimodal',
+            'algo': algo_name,
+            'cv_mean': np.nan,  # 双峰模式无单一 CV 值，用 NaN 占位
+            'cvr_mean': np.mean(res[algo_name]['cvr']),
+            'cvr_std': np.std(res[algo_name]['cvr']),
+            'L0_mean': np.mean(res[algo_name]['L0']),
+            'cvr_max': np.max(res[algo_name]['cvr'])
+        })
+
+    df = pd.DataFrame(csv_data)
+    df.to_csv("results_exp4_bimodal.csv", index=False)
+    print(f"\nSaved to results_exp4_bimodal.csv")
+
+    return res
+
 if __name__ == "__main__":
     print("="*60)
     print("ICDCS Paper Experiments")
     print("="*60)
 
-    exp1_main_comparison()
-    exp2_sensitivity_cv()
-    exp3_ablation_study()
+    #exp1_main_comparison()
+    #exp2_sensitivity_cv()
+    #exp3_ablation_study()
+    exp4_bimodal_comparison()
 
     print("\n" + "="*60)
     print("All experiments completed!")
