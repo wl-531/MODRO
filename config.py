@@ -24,7 +24,7 @@ W3 = 0.35        # Marginal Uncertainty Risk 权重
 # 实验物理参数（压力测试配置 - 调整至临界可行）
 BATCH_SIZE = 70                 # 略降批量，减轻鲁棒负载
 N_SERVERS = 5                   # 服务器数量
-DECISION_INTERVAL = 12         # 略增决策窗口，目标 rho_eff≈0.9-1.0
+DECISION_INTERVAL = 10         # 略增决策窗口，目标 rho_eff≈0.9-1.0
 
 # 任务工作量参数
 MU_RANGE = (50, 60)            # 期望工作量范围
