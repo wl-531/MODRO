@@ -17,9 +17,9 @@ LAMBDA_0 = 5.0   # 初始惩罚系数
 BETA = 0.3        # 惩罚系数增长速度
 
 # 目标权重 (异构场景推荐)
-W1 = 0         # Robust Makespan 权重
-W2 = 0.55         # Robust Load Imbalance 权重
-W3 = 0        # Marginal Uncertainty Risk 权重
+W1 = 0.4         # Robust Makespan 权重
+W2 = 0.25         # Robust Load Imbalance 权重
+W3 = 0.35        # Marginal Uncertainty Risk 权重
 
 # 实验物理参数（压力测试配置 - 调整至临界可行）
 BATCH_SIZE = 70                 # 略降批量，减轻鲁棒负载
