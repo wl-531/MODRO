@@ -242,7 +242,7 @@ def exp3_ablation_study():
         'CV_RANGE': (0.60, 0.80),    # 增大波动
         'ALPHA': 0.15,
         'KAPPA': 2.38,
-        'THETA': 0.80,
+        'THETA': 1.0,
         'VAG_LAMBDA': 1.0
     })
 

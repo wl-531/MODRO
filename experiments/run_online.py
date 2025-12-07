@@ -79,9 +79,12 @@ def run_experiment(n_batches: int = 10, verbose: bool = True, task_mode: str = "
         decision_interval=DECISION_INTERVAL
     )
 
-    # 验证系统参数
-    mu_avg = sum(MU_RANGE) / 2
-    cv_avg = sum(CV_RANGE) / 2
+    # 验证系统参数（根据生成的任务均值/方差估算）
+    sample_tasks = generate_tasks(BATCH_SIZE, MU_RANGE, CV_RANGE, mode=task_mode)
+    mu_vals = np.array([t.mu for t in sample_tasks])
+    sigma_vals = np.array([t.sigma for t in sample_tasks])
+    mu_avg = float(np.mean(mu_vals))
+    cv_avg = float(np.mean(sigma_vals / np.maximum(mu_vals, 1e-6)))
     validation = validate_system_params(
         servers_init, BATCH_SIZE, mu_avg, cv_avg, KAPPA, THETA
     )
