@@ -20,6 +20,7 @@ from solvers.baselines import deterministic_greedy, variance_aware_greedy
 from solvers.nsga2_mean import NSGA2MeanSolver
 from experiments.run_online import update_server_state
 from evaluation.monte_carlo import monte_carlo_cvr
+from evaluation.server_monitor import ServerMonitor
 
 def set_config(updates: dict):
     for key, val in updates.items():
@@ -30,7 +31,7 @@ if not hasattr(config, 'VAG_LAMBDA'):
     setattr(config, 'VAG_LAMBDA', 1.0)
 
 def run_batch_simulation(n_batches=50, label="Experiment", enable_all_algos=True,
-                         task_mode="coupled"):
+                         task_mode="coupled", enable_diagnostics=False):
     """运行批量仿真，支持4个算法：DG / VAG / NSGA2Mean / ROSA
 
     Args:
@@ -40,12 +41,16 @@ def run_batch_simulation(n_batches=50, label="Experiment", enable_all_algos=True
         task_mode: 任务生成模式
             - "coupled": 原模式，σ = μ × CV（默认）
             - "bimodal": 双峰模式，μ-σ 解耦
+        enable_diagnostics: 是否启用服务器状态监控（诊断用）
 
     Returns:
         results: {algo_name: {'cvr': [...], 'L0': [...]}}
     """
     print(f"\n>>> Running {label} (n={n_batches}, task_mode={task_mode})...")
     np.random.seed(42)
+
+    # 初始化监控器（如果启用）
+    monitor = ServerMonitor() if enable_diagnostics else None
 
     # MODIFIED: 创建4份独立服务器副本
     servers_init = generate_servers(config.N_SERVERS, decision_interval=config.DECISION_INTERVAL)
@@ -90,12 +95,16 @@ def run_batch_simulation(n_batches=50, label="Experiment", enable_all_algos=True
         assign_dg = deterministic_greedy(tasks, servers_dg)
         cvr_dg = monte_carlo_cvr(assign_dg, tasks, servers_dg, config.MC_SAMPLES)
         L0_dg = sum(s.L0 for s in servers_dg)
+        if monitor:
+            monitor.record_batch(i, "dg", assign_dg, tasks, servers_dg)
         update_server_state(servers_dg, assign_dg, tasks, config.DECISION_INTERVAL)
 
         # ROSA算法
         assign_rosa = rosa.solve_batch(tasks, servers_rosa)
         cvr_rosa = monte_carlo_cvr(assign_rosa, tasks, servers_rosa, config.MC_SAMPLES)
         L0_rosa = sum(s.L0 for s in servers_rosa)
+        if monitor:
+            monitor.record_batch(i, "rosa", assign_rosa, tasks, servers_rosa)
         update_server_state(servers_rosa, assign_rosa, tasks, config.DECISION_INTERVAL)
 
         # NEW: VAG算法
@@ -103,6 +112,8 @@ def run_batch_simulation(n_batches=50, label="Experiment", enable_all_algos=True
             assign_vag = variance_aware_greedy(tasks, servers_vag, lambda_=config.VAG_LAMBDA)
             cvr_vag = monte_carlo_cvr(assign_vag, tasks, servers_vag, config.MC_SAMPLES)
             L0_vag = sum(s.L0 for s in servers_vag)
+            if monitor:
+                monitor.record_batch(i, "vag", assign_vag, tasks, servers_vag)
             update_server_state(servers_vag, assign_vag, tasks, config.DECISION_INTERVAL)
 
         # NEW: NSGA2Mean算法
@@ -110,6 +121,8 @@ def run_batch_simulation(n_batches=50, label="Experiment", enable_all_algos=True
             assign_nsga = nsga.solve_batch(tasks, servers_nsga)
             cvr_nsga = monte_carlo_cvr(assign_nsga, tasks, servers_nsga, config.MC_SAMPLES)
             L0_nsga = sum(s.L0 for s in servers_nsga)
+            if monitor:
+                monitor.record_batch(i, "nsga", assign_nsga, tasks, servers_nsga)
             update_server_state(servers_nsga, assign_nsga, tasks, config.DECISION_INTERVAL)
 
         # MODIFIED: 记录结果
@@ -131,6 +144,13 @@ def run_batch_simulation(n_batches=50, label="Experiment", enable_all_algos=True
             print(f"\r  Batch {i+1}/{n_batches} | DG CVR={cvr_dg:.4f} L0={L0_dg:.1f} | ROSA CVR={cvr_rosa:.4f} L0={L0_rosa:.1f}", end="")
 
     print()
+
+    # 导出诊断数据（如果启用）
+    if monitor:
+        csv_filename = f"diagnostics_{label.lower().replace(' ', '_')}.csv"
+        monitor.export_csv(csv_filename)
+        monitor.print_summary()
+
     return results
 
 def exp1_main_comparison():
@@ -154,9 +174,9 @@ def exp1_main_comparison():
     n_batches = 50
     res = run_batch_simulation(
         n_batches=n_batches,
-        label="Exp1_Moderate_Multiclass",
+        label="Exp1_Moderate_Bimodal",
         enable_all_algos=True,
-        task_mode="multiclass"
+        task_mode="bimodal"
     )
 
     # 仅关注 DG / NSGA / ROSA 的概览

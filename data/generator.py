@@ -17,9 +17,9 @@ def generate_tasks(n_tasks: int,
         cv_range: 变异系数范围（仅在 mode="coupled" 下使用）
         mode: 生成模式
             - "coupled": 原模式，sigma = mu * CV（默认，保持向后兼容）
-            - "bimodal": 双峰模式，mu-σ 解耦
-              * ~50% 任务：Type A（稳定），mu∈[55,65], CV∈[0.08,0.12]
-              * ~50% 任务：Type B（疯狂），mu∈[55,65], CV∈[0.70,0.90]
+            - "bimodal": 双峰模式，极端 mu-σ 解耦（陷阱任务 vs 稳定任务）
+              * 40% 任务：Type A（陷阱），mu∈[30,50], CV∈[2.0,3.5] → σ∈[60,175]
+              * 60% 任务：Type B（稳定），mu∈[80,120], CV∈[0.1,0.2] → σ∈[8,24]
             - "multiclass": 多类型任务模式
               * 25% 视频/重计算：mu∈[80,120], CV∈[0.30,0.50]
               * 25% IO/抖动型：mu∈[50,70], CV∈[0.60,0.90]（高风险）
@@ -40,22 +40,24 @@ def generate_tasks(n_tasks: int,
             tasks.append(Task(mu=mu, sigma=sigma))
 
     elif mode == "bimodal":
-        # 双峰：mu-σ 解耦，mu 相近但方差差异极大
-        mu_A_range = (55.0, 65.0)
-        cv_A_range = (0.58, 0.92)
+        # 双峰：极端 μ-σ 解耦（陷阱任务 vs 稳定任务）
+        # Type A: 轻量但疯狂（低μ高σ）—— "陷阱任务"
+        mu_A_range = (30, 50)
+        cv_A_range = (2.0, 3.5)   # σ ∈ [60, 175]
 
-        mu_B_range = (55.0, 65.0)
-        cv_B_range = (1.80, 2.60)
+        # Type B: 重量但稳定（高μ低σ）
+        mu_B_range = (80, 120)
+        cv_B_range = (0.10, 0.20)  # σ ∈ [8, 24]
 
-        # 按 1:2 比例生成：A 占约 1/3，B 占约 2/3（余数给 B）
-        n_type_A = n_tasks // 3
+        # Type A 占 40%
+        n_type_A = int(n_tasks * 0.4)
         for _ in range(n_type_A):
             mu = np.random.uniform(*mu_A_range)
             cv = np.random.uniform(*cv_A_range)
             sigma = mu * cv
             tasks.append(Task(mu=mu, sigma=sigma))
 
-        # 其余生成 Type B
+        # Type B 占剩余 60%
         n_type_B = n_tasks - n_type_A
         for _ in range(n_type_B):
             mu = np.random.uniform(*mu_B_range)

@@ -1,5 +1,6 @@
-"""微批处理在线实验 - ROSA vs Baseline对比"""
+"""微批处理在线实验 - 基线算法 vs RA-LNS 对比"""
 import numpy as np
+import time
 import sys
 import os
 from copy import deepcopy
@@ -8,261 +9,226 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from config import *
 from models.task import Task
 from models.server import Server
-from solvers.rosa import ROSASolver
-# MODIFIED: 从baselines模块导入baseline算法
 from solvers.baselines import deterministic_greedy, variance_aware_greedy
-from solvers.nsga2_mean import NSGA2MeanSolver  # NEW: risk-neutral NSGA-II
-from solvers.kappa_greedy import kappa_greedy  # NEW: κ-Greedy baseline
-from evaluation.objectives import compute_objectives
+from solvers.kappa_greedy import kappa_greedy
+from solvers.ra_lns import RALNSSolver
+from evaluation.metrics_unified import compute_metrics_unified
 from evaluation.monte_carlo import monte_carlo_cvr
 from data.generator import generate_tasks, generate_servers, validate_system_params
 
-# MOVED: deterministic_greedy 已移至 solvers/baselines.py
 
-
-def update_server_state(servers: list, assignment: list, tasks: list,
-                        processing_time: float):
-    """更新服务器已有负载
-
-    [关键修正] 使用实际采样的工作量（而非期望值）来更新状态
-    这体现了任务工作量的不确定性——论文的核心主题
-
-    重要说明:
-    - 实际工作量 w_i ~ N(μ_i, σ_i²)
-    - 一旦任务执行完成，其实际工作量成为确定值（L0 的一部分）
-    - L0 被视为确定性负载（方差已实现或通过监控获知）
-    """
+def update_server_state(servers, assignment, tasks, processing_time):
+    """更新服务器已有负载（采样实际工作量）"""
     n_servers = len(servers)
-
-    # [关键修改] 采样实际工作量，而非使用期望值
     actual_load = np.zeros(n_servers)
+    
     for i, j in enumerate(assignment):
-        # 从 N(μ, σ²) 采样实际工作量
         w_actual = np.random.normal(tasks[i].mu, tasks[i].sigma)
-        w_actual = max(0.0, w_actual)  # 截断负值
+        w_actual = max(0.0, w_actual)
         actual_load[j] += w_actual
-
-    # 更新 L0
+    
     for j in range(n_servers):
         processed = servers[j].f * processing_time
         servers[j].L0 = max(0.0, servers[j].L0 + actual_load[j] - processed)
 
 
-def run_experiment(n_batches: int = 10, verbose: bool = True, task_mode: str = "coupled"):
-    """运行微批处理在线实验 - ROSA vs Baseline对比
-
-    Args:
-        n_batches: 批次数
-        verbose: 是否打印每批次日志
-        task_mode: 任务生成模式 ("coupled" 默认，"bimodal" 生成双峰任务)
-    """
-
+def run_experiment(n_batches=10, verbose=True, task_mode="coupled"):
+    """运行微批处理在线实验 - 基线算法 vs RA-LNS 对比"""
+    
     # 固定随机种子确保可复现
     np.random.seed(42)
-
-    rosa = ROSASolver(
-        kappa=KAPPA, theta=THETA,
-        n_pop=N_POP, g_max=G_MAX, t_max=T_MAX,
-        p_c=P_C, p_m=P_M, p_risk=P_RISK, n_elite=N_ELITE,
-        lambda_0=LAMBDA_0, beta=BETA,
-        w1=W1, w2=W2, w3=W3
+    
+    # 初始化 RA-LNS solver
+    ra_lns = RALNSSolver(
+        kappa=KAPPA,
+        patience=RA_LNS_PATIENCE,
+        destroy_k=RA_LNS_DESTROY_K,
+        t_max=RA_LNS_T_MAX,
+        eps_div=RA_LNS_EPS_DIV,
+        tol_feas=RA_LNS_TOL_FEAS
     )
-    # NEW: NSGA-II (均值) baseline
-    nsga_mean = NSGA2MeanSolver(
-        n_pop=N_POP, g_max=G_MAX, t_max=T_MAX,
-        p_c=P_C, p_m=P_M, n_elite=N_ELITE,
-        w1=W1, w2=W2, w3=W3
-    )
-
+    
     # 生成初始服务器
-    servers_init = generate_servers(
-        N_SERVERS,
-        decision_interval=DECISION_INTERVAL
-    )
-
-    # 验证系统参数（根据生成的任务均值/方差估算）
+    servers_init = generate_servers(N_SERVERS, decision_interval=DECISION_INTERVAL)
+    
+    # 验证系统参数
     sample_tasks = generate_tasks(BATCH_SIZE, MU_RANGE, CV_RANGE, mode=task_mode)
     mu_vals = np.array([t.mu for t in sample_tasks])
     sigma_vals = np.array([t.sigma for t in sample_tasks])
     mu_avg = float(np.mean(mu_vals))
     cv_avg = float(np.mean(sigma_vals / np.maximum(mu_vals, 1e-6)))
-    validation = validate_system_params(
-        servers_init, BATCH_SIZE, mu_avg, cv_avg, KAPPA, THETA
-    )
-
+    validation = validate_system_params(servers_init, BATCH_SIZE, mu_avg, cv_avg, KAPPA, 1.0)
+    
     print("===== 系统参数验证 =====")
     print(f"总容量: {validation['total_capacity']:.0f}")
     print(f"期望负载: {validation['expected_load']:.0f}")
     print(f"鲁棒负载(分散): {validation['robust_load']:.0f}")
-    print(f"鲁棒Buffer(分散): {validation['robust_buffer']:.0f}")
-    print(f"鲁棒Buffer(聚合): {validation['aggregated_buffer']:.0f}")
-    print(f"Buffer放大倍数: {validation['buffer_ratio']:.2f} (理论值sqrt{N_SERVERS}={np.sqrt(N_SERVERS):.2f})")
     print(f"期望负载率 rho: {validation['rho_expected']:.3f}")
     print(f"鲁棒负载率 rho_robust: {validation['rho_robust']:.3f}")
-    print(f"有效负载率 rho_eff (theta={THETA}): {validation['rho_effective']:.3f}")
     print(f"系统可行性: {'[OK] 可行' if validation['feasible'] else '[FAIL] 不可行'}")
     print()
-
-    if not validation['feasible']:
-        print("警告: 系统参数导致无可行解,请增加 DECISION_INTERVAL")
-#        return None
-
-    # MODIFIED: 使用deepcopy创建完全独立的三环境
-    servers_baseline = deepcopy(servers_init)
-    servers_rosa = deepcopy(servers_init)
-    servers_vag = deepcopy(servers_init)  # NEW: VAG独立环境
-    servers_nsga = deepcopy(servers_init)  # NEW: NSGA-II(均值)独立环境
-    servers_kappa = deepcopy(servers_init)  # NEW: κ-Greedy独立环境
-
-    results_baseline = {'cvr': [], 'residual': []}
-    results_rosa = {'cvr': [], 'O1': [], 'O2': [], 'O3': [], 'residual': []}
-    results_vag = {'cvr': [], 'residual': []}  # NEW: VAG结果记录
-    results_nsga = {'cvr': [], 'residual': []}  # NEW: NSGA-II(均值)结果记录
-    results_kappa = {'cvr': [], 'residual': []}  # NEW: κ-Greedy结果记录
-
-    print("===== ROSA vs Baseline vs VAG 对比实验 =====\n")
-
+    
+    # 创建独立环境
+    servers_dg = deepcopy(servers_init)
+    servers_vag = deepcopy(servers_init)
+    servers_kappa = deepcopy(servers_init)
+    servers_ralns = deepcopy(servers_init)
+    
+    # 初始化结果记录
+    def init_results():
+        return {
+            'cvr': [],
+            'U_max': [],
+            'O1': [],
+            'R_sum': [],
+            'O2': [],
+            'residual': [],
+            'time_ms': []
+        }
+    
+    results_dg = init_results()
+    results_vag = init_results()
+    results_kappa = init_results()
+    results_ralns = init_results()
+    results_ralns['fallback_count'] = []
+    
+    print("===== 基线算法 vs RA-LNS 对比实验 =====\n")
+    
     for batch_idx in range(n_batches):
-        # 生成相同的任务批次（支持 bimodal/coupled）
+        # 生成相同的任务批次
         tasks = generate_tasks(BATCH_SIZE, MU_RANGE, CV_RANGE, mode=task_mode)
-
-        # [关键] 记录更新前的残留负载
-        residual_baseline_before = sum(s.L0 for s in servers_baseline)
-        residual_rosa_before = sum(s.L0 for s in servers_rosa)
-        residual_vag_before = sum(s.L0 for s in servers_vag)  # NEW
-        residual_nsga_before = sum(s.L0 for s in servers_nsga)  # NEW
-        residual_kappa_before = sum(s.L0 for s in servers_kappa)  # NEW
-
-        # Baseline算法
-        assignment_baseline = deterministic_greedy(tasks, servers_baseline)
-        cvr_baseline = monte_carlo_cvr(assignment_baseline, tasks, servers_baseline, MC_SAMPLES)
-
-        # ROSA算法
-        assignment_rosa = rosa.solve_batch(tasks, servers_rosa)
-        cvr_rosa = monte_carlo_cvr(assignment_rosa, tasks, servers_rosa, MC_SAMPLES)
-        obj_rosa = compute_objectives(assignment_rosa, tasks, servers_rosa, KAPPA, THETA)
-
-        # NEW: VAG算法
-        assignment_vag = variance_aware_greedy(tasks, servers_vag, lambda_=1.0)
-        cvr_vag = monte_carlo_cvr(assignment_vag, tasks, servers_vag, MC_SAMPLES)
-        # NEW: κ-Greedy算法
-        assignment_kappa = kappa_greedy(tasks, servers_kappa, kappa=KAPPA)
-        cvr_kappa = monte_carlo_cvr(assignment_kappa, tasks, servers_kappa, MC_SAMPLES)
-        # NEW: NSGA-II(均值)算法
-        assignment_nsga = nsga_mean.solve_batch(tasks, servers_nsga)
-        cvr_nsga = monte_carlo_cvr(assignment_nsga, tasks, servers_nsga, MC_SAMPLES)
-
-        # [关键] 先更新服务器状态，再记录更新后的残留负载
-        update_server_state(servers_baseline, assignment_baseline, tasks,
-                           processing_time=DECISION_INTERVAL)
-        update_server_state(servers_rosa, assignment_rosa, tasks,
-                           processing_time=DECISION_INTERVAL)
-        update_server_state(servers_vag, assignment_vag, tasks,  # NEW
-                           processing_time=DECISION_INTERVAL)
-        update_server_state(servers_nsga, assignment_nsga, tasks,  # NEW
-                           processing_time=DECISION_INTERVAL)
-        update_server_state(servers_kappa, assignment_kappa, tasks,  # NEW
-                           processing_time=DECISION_INTERVAL)
-
-        residual_baseline_after = sum(s.L0 for s in servers_baseline)
-        residual_rosa_after = sum(s.L0 for s in servers_rosa)
-        residual_vag_after = sum(s.L0 for s in servers_vag)  # NEW
-        residual_nsga_after = sum(s.L0 for s in servers_nsga)  # NEW
-        residual_kappa_after = sum(s.L0 for s in servers_kappa)  # NEW
-
-        # 记录结果
-        results_baseline['cvr'].append(cvr_baseline)
-        results_baseline['residual'].append(residual_baseline_after)
-
-        results_rosa['cvr'].append(cvr_rosa)
-        results_rosa['O1'].append(obj_rosa['O1'])
-        results_rosa['O2'].append(obj_rosa['O2'])
-        results_rosa['O3'].append(obj_rosa['O3'])
-        results_rosa['residual'].append(residual_rosa_after)
-
-        # NEW: 记录VAG结果
+        
+        # ═══════ DG ═══════
+        t0 = time.perf_counter()
+        assign_dg = deterministic_greedy(tasks, servers_dg)
+        time_dg = (time.perf_counter() - t0) * 1000
+        
+        cvr_dg = monte_carlo_cvr(assign_dg, tasks, servers_dg, MC_SAMPLES)
+        metrics_dg = compute_metrics_unified(assign_dg, tasks, servers_dg, KAPPA, RA_LNS_EPS_DIV, RA_LNS_TOL_FEAS)
+        
+        results_dg['cvr'].append(cvr_dg)
+        results_dg['U_max'].append(metrics_dg['U_max'])
+        results_dg['O1'].append(metrics_dg['O1'])
+        results_dg['R_sum'].append(metrics_dg['R_sum'])
+        results_dg['O2'].append(metrics_dg['O2'])
+        results_dg['time_ms'].append(time_dg)
+        
+        # ═══════ VAG ═══════
+        t0 = time.perf_counter()
+        assign_vag = variance_aware_greedy(tasks, servers_vag, lambda_=1.0)
+        time_vag = (time.perf_counter() - t0) * 1000
+        
+        cvr_vag = monte_carlo_cvr(assign_vag, tasks, servers_vag, MC_SAMPLES)
+        metrics_vag = compute_metrics_unified(assign_vag, tasks, servers_vag, KAPPA, RA_LNS_EPS_DIV, RA_LNS_TOL_FEAS)
+        
         results_vag['cvr'].append(cvr_vag)
-        results_vag['residual'].append(residual_vag_after)
-        # NEW: 记录NSGA-II(均值)结果
-        results_nsga['cvr'].append(cvr_nsga)
-        results_nsga['residual'].append(residual_nsga_after)
-        # NEW: 记录κ-Greedy结果
+        results_vag['U_max'].append(metrics_vag['U_max'])
+        results_vag['O1'].append(metrics_vag['O1'])
+        results_vag['R_sum'].append(metrics_vag['R_sum'])
+        results_vag['O2'].append(metrics_vag['O2'])
+        results_vag['time_ms'].append(time_vag)
+        
+        # ═══════ κ-Greedy ═══════
+        t0 = time.perf_counter()
+        assign_kappa = kappa_greedy(tasks, servers_kappa, kappa=KAPPA)
+        time_kappa = (time.perf_counter() - t0) * 1000
+        
+        cvr_kappa = monte_carlo_cvr(assign_kappa, tasks, servers_kappa, MC_SAMPLES)
+        metrics_kappa = compute_metrics_unified(assign_kappa, tasks, servers_kappa, KAPPA, RA_LNS_EPS_DIV, RA_LNS_TOL_FEAS)
+        
         results_kappa['cvr'].append(cvr_kappa)
-        results_kappa['residual'].append(residual_kappa_after)
-
-        # 计算改进百分比
-        improvement = ((cvr_baseline - cvr_rosa) / max(cvr_baseline, 1e-6)) * 100
-        improvement_vag = ((cvr_baseline - cvr_vag) / max(cvr_baseline, 1e-6)) * 100  # NEW
-        improvement_nsga = ((cvr_baseline - cvr_nsga) / max(cvr_baseline, 1e-6)) * 100  # NEW
-        improvement_kappa = ((cvr_baseline - cvr_kappa) / max(cvr_baseline, 1e-6)) * 100  # NEW
-
-        if verbose:  # MODIFIED: 添加VAG输出
+        results_kappa['U_max'].append(metrics_kappa['U_max'])
+        results_kappa['O1'].append(metrics_kappa['O1'])
+        results_kappa['R_sum'].append(metrics_kappa['R_sum'])
+        results_kappa['O2'].append(metrics_kappa['O2'])
+        results_kappa['time_ms'].append(time_kappa)
+        
+        # ═══════ RA-LNS ═══════
+        t0 = time.perf_counter()
+        assign_ralns, fb_count = ra_lns.solve(tasks, servers_ralns)
+        time_ralns = (time.perf_counter() - t0) * 1000
+        
+        cvr_ralns = monte_carlo_cvr(assign_ralns, tasks, servers_ralns, MC_SAMPLES)
+        metrics_ralns = compute_metrics_unified(assign_ralns, tasks, servers_ralns, KAPPA, RA_LNS_EPS_DIV, RA_LNS_TOL_FEAS)
+        
+        results_ralns['cvr'].append(cvr_ralns)
+        results_ralns['U_max'].append(metrics_ralns['U_max'])
+        results_ralns['O1'].append(metrics_ralns['O1'])
+        results_ralns['R_sum'].append(metrics_ralns['R_sum'])
+        results_ralns['O2'].append(metrics_ralns['O2'])
+        results_ralns['time_ms'].append(time_ralns)
+        results_ralns['fallback_count'].append(fb_count)
+        
+        # 更新服务器状态
+        update_server_state(servers_dg, assign_dg, tasks, DECISION_INTERVAL)
+        update_server_state(servers_vag, assign_vag, tasks, DECISION_INTERVAL)
+        update_server_state(servers_kappa, assign_kappa, tasks, DECISION_INTERVAL)
+        update_server_state(servers_ralns, assign_ralns, tasks, DECISION_INTERVAL)
+        
+        residual_dg = sum(s.L0 for s in servers_dg)
+        residual_vag = sum(s.L0 for s in servers_vag)
+        residual_kappa = sum(s.L0 for s in servers_kappa)
+        residual_ralns = sum(s.L0 for s in servers_ralns)
+        
+        results_dg['residual'].append(residual_dg)
+        results_vag['residual'].append(residual_vag)
+        results_kappa['residual'].append(residual_kappa)
+        results_ralns['residual'].append(residual_ralns)
+        
+        if verbose:
             print(f"Batch {batch_idx + 1}/{n_batches}: "
-                  f"Baseline_CVR={cvr_baseline:.4f} (L0: {residual_baseline_before:.1f}->{residual_baseline_after:.1f}) | "
-                  f"VAG_CVR={cvr_vag:.4f} (L0: {residual_vag_before:.1f}->{residual_vag_after:.1f}) | "
-                  f"kappa_CVR={cvr_kappa:.4f} (L0: {residual_kappa_before:.1f}->{residual_kappa_after:.1f}) | "
-                  f"NSGAmean_CVR={cvr_nsga:.4f} (L0: {residual_nsga_before:.1f}->{residual_nsga_after:.1f}) | "
-                  f"ROSA_CVR={cvr_rosa:.4f} (L0: {residual_rosa_before:.1f}->{residual_rosa_after:.1f}) "
-                  f"[ROSA vs Base: {improvement:+.1f}% | VAG vs Base: {improvement_vag:+.1f}% | "
-                  f"kappa vs Base: {improvement_kappa:+.1f}% | NSGAmean vs Base: {improvement_nsga:+.1f}%]")
-
+                  f"DG_CVR={cvr_dg:.4f} | "
+                  f"VAG_CVR={cvr_vag:.4f} | "
+                  f"κ_CVR={cvr_kappa:.4f} | "
+                  f"RA-LNS_CVR={cvr_ralns:.4f} "
+                  f"[Time: DG={time_dg:.2f}ms, VAG={time_vag:.2f}ms, "
+                  f"κ={time_kappa:.2f}ms, RA-LNS={time_ralns:.2f}ms]")
+    
     # 汇总结果
     print("\n===== 实验结果汇总 =====")
-    print(f"\n[Baseline - Deterministic Greedy]")
-    print(f"  平均 CVR: {np.mean(results_baseline['cvr']):.4f} ± {np.std(results_baseline['cvr']):.4f}")
-    print(f"  平均残留: {np.mean(results_baseline['residual']):.1f}")
-
-    # NEW: 添加VAG统计
-    print(f"\n[VAG - Variance-Aware Greedy]")
-    print(f"  平均 CVR: {np.mean(results_vag['cvr']):.4f} ± {np.std(results_vag['cvr']):.4f}")
-    print(f"  平均残留: {np.mean(results_vag['residual']):.1f}")
-    # NEW: 添加κ-Greedy统计
-    print(f"\n[κ-Greedy - Robust Greedy]")
-    print(f"  平均 CVR: {np.mean(results_kappa['cvr']):.4f} ± {np.std(results_kappa['cvr']):.4f}")
-    print(f"  平均残留: {np.mean(results_kappa['residual']):.1f}")
-    # NEW: 添加NSGA-II(均值)统计
-    print(f"\n[NSGA-II Mean - Risk Neutral]")
-    print(f"  平均 CVR: {np.mean(results_nsga['cvr']):.4f} ± {np.std(results_nsga['cvr']):.4f}")
-    print(f"  平均残留: {np.mean(results_nsga['residual']):.1f}")
-
-    print(f"\n[ROSA - Robust Online Scheduling]")
-    print(f"  平均 CVR: {np.mean(results_rosa['cvr']):.4f} ± {np.std(results_rosa['cvr']):.4f}")
-    print(f"  平均 O1:  {np.mean(results_rosa['O1']):.2f} ± {np.std(results_rosa['O1']):.2f}")
-    print(f"  平均 O2:  {np.mean(results_rosa['O2']):.4f} ± {np.std(results_rosa['O2']):.4f}")
-    print(f"  平均 O3:  {np.mean(results_rosa['O3']):.2f} ± {np.std(results_rosa['O3']):.2f}")
-    print(f"  平均残留: {np.mean(results_rosa['residual']):.1f}")
-
-    # MODIFIED: 总体改进（添加VAG）
-    avg_baseline_cvr = np.mean(results_baseline['cvr'])
-    avg_vag_cvr = np.mean(results_vag['cvr'])  # NEW
-    avg_nsga_cvr = np.mean(results_nsga['cvr'])  # NEW
-    avg_kappa_cvr = np.mean(results_kappa['cvr'])  # NEW
-    avg_rosa_cvr = np.mean(results_rosa['cvr'])
-    total_improvement_rosa = ((avg_baseline_cvr - avg_rosa_cvr) / max(avg_baseline_cvr, 1e-6)) * 100
-    total_improvement_vag = ((avg_baseline_cvr - avg_vag_cvr) / max(avg_baseline_cvr, 1e-6)) * 100  # NEW
-    total_improvement_nsga = ((avg_baseline_cvr - avg_nsga_cvr) / max(avg_baseline_cvr, 1e-6)) * 100  # NEW
-    total_improvement_kappa = ((avg_baseline_cvr - avg_kappa_cvr) / max(avg_baseline_cvr, 1e-6)) * 100  # NEW
-
+    
+    def print_results(name, results):
+        print(f"\n[{name}]")
+        print(f"  CVR:    {np.mean(results['cvr']):.4f} ± {np.std(results['cvr']):.4f}")
+        print(f"  U_max:  {np.mean(results['U_max']):.4f}")
+        print(f"  O1:     {np.mean(results['O1']):.2f}")
+        print(f"  R_sum:  {np.mean(results['R_sum']):.4f}")
+        print(f"  O2:     {np.mean(results['O2']):.2f}")
+        print(f"  Residual: {np.mean(results['residual']):.1f}")
+        print(f"  Time:   {np.mean(results['time_ms']):.2f}ms "
+              f"(p50={np.percentile(results['time_ms'], 50):.2f}, "
+              f"p99={np.percentile(results['time_ms'], 99):.2f})")
+    
+    print_results("DG - Deterministic Greedy", results_dg)
+    print_results("VAG - Variance-Aware Greedy", results_vag)
+    print_results("κ-Greedy - Robust Greedy", results_kappa)
+    print_results("RA-LNS - Risk-Aware LNS", results_ralns)
+    print(f"  Fallback total: {sum(results_ralns['fallback_count'])}")
+    
+    # 对比结果
     print(f"\n[对比结果]")
-    print(f"  VAG相对Baseline的CVR改进: {total_improvement_vag:+.1f}%")  # NEW
-    print(f"  κ-Greedy相对Baseline的CVR改进: {total_improvement_kappa:+.1f}%")  # NEW
-    print(f"  NSGA-II(Mean)相对Baseline的CVR改进: {total_improvement_nsga:+.1f}%")  # NEW
-    print(f"  ROSA相对Baseline的CVR改进: {total_improvement_rosa:+.1f}%")
-
-    if avg_rosa_cvr < ALPHA:
-        print(f"  ROSA性能: [成功] CVR ({avg_rosa_cvr:.4f}) < α ({ALPHA})")
+    baseline_cvr = np.mean(results_dg['cvr'])
+    vag_cvr = np.mean(results_vag['cvr'])
+    kappa_cvr = np.mean(results_kappa['cvr'])
+    ralns_cvr = np.mean(results_ralns['cvr'])
+    
+    print(f"  VAG vs DG: {((baseline_cvr - vag_cvr) / max(baseline_cvr, 1e-6)) * 100:+.1f}%")
+    print(f"  κ-Greedy vs DG: {((baseline_cvr - kappa_cvr) / max(baseline_cvr, 1e-6)) * 100:+.1f}%")
+    print(f"  RA-LNS vs DG: {((baseline_cvr - ralns_cvr) / max(baseline_cvr, 1e-6)) * 100:+.1f}%")
+    print(f"  RA-LNS vs κ-Greedy: {((kappa_cvr - ralns_cvr) / max(kappa_cvr, 1e-6)) * 100:+.1f}%")
+    
+    if ralns_cvr < ALPHA:
+        print(f"  RA-LNS性能: [成功] CVR ({ralns_cvr:.4f}) < α ({ALPHA})")
     else:
-        print(f"  ROSA性能: [失败] CVR ({avg_rosa_cvr:.4f}) >= α ({ALPHA})")
-
-    return {  # MODIFIED: 添加VAG/NSGA/κ-Greedy结果
-        'baseline': results_baseline,
-        'vag': results_vag,  # NEW
-        'nsga_mean': results_nsga,  # NEW
-        'kappa': results_kappa,  # NEW
-        'rosa': results_rosa
+        print(f"  RA-LNS性能: [警告] CVR ({ralns_cvr:.4f}) >= α ({ALPHA})")
+    
+    return {
+        'dg': results_dg,
+        'vag': results_vag,
+        'kappa': results_kappa,
+        'ralns': results_ralns
     }
 
 
 if __name__ == '__main__':
-    #results = run_experiment(n_batches=10, verbose=True)
-    results = run_experiment(n_batches=10, verbose=True, task_mode="multiclass")
+    results = run_experiment(n_batches=10, verbose=True, task_mode="bimodal")
