@@ -12,8 +12,8 @@ RA_LNS_EPS_DIV = 1e-6       # 除零保护：max(Gap, eps_div), max(sigma, eps_d
 RA_LNS_TOL_FEAS = 1e-9      # 可行性判断：Gap >= -tol_feas
 
 # 实验参数
-BATCH_SIZE = 425            # 任务批次大小
-N_SERVERS = 10              # 服务器数量
+BATCH_SIZE = 1000            # 任务批次大小
+N_SERVERS = 26              # 服务器数量
 DECISION_INTERVAL = 30      # 决策周期（秒）
 
 # 任务工作量参数
